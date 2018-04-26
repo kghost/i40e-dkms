@@ -1,0 +1,8 @@
+debian/.debhelper/
+debian/files
+debian/i40e-dkms.debhelper.log
+debian/i40e-dkms.dkms.debhelper
+debian/i40e-dkms.postinst.debhelper
+debian/i40e-dkms.prerm.debhelper
+debian/i40e-dkms.substvars
+debian/i40e-dkms/
