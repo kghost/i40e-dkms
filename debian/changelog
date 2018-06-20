@@ -1,3 +1,9 @@
+i40e-dkms (2.4.10-1) unstable; urgency=medium
+
+  * New upstream version 2.4.10
+
+ -- Zang MingJie <zealot0630@gmail.com>  Wed, 20 Jun 2018 14:37:02 +0800
+
 i40e-dkms (2.4.6-1) unstable; urgency=medium
 
   * Initial package.
