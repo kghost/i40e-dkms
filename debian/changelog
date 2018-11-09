@@ -1,3 +1,9 @@
+i40e-dkms (2.7.12-1) unstable; urgency=medium
+
+  * New upstream version 2.7.12
+
+ -- Zang MingJie <zealot0630@gmail.com>  Fri, 09 Nov 2018 17:04:21 +0800
+
 i40e-dkms (2.4.10-1) unstable; urgency=medium
 
   * New upstream version 2.4.10
