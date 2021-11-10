@@ -1,6 +1,6 @@
 Name: i40e
 Summary: Intel(R) 40-10 Gigabit Ethernet Connection Network Driver
-Version: 2.7.12
+Version: 2.17.4
 Release: 1
 Source: %{name}-%{version}.tar.gz
 Vendor: Intel Corporation
@@ -17,7 +17,19 @@ BuildRoot: %{_tmppath}/%{name}-%{version}-root
 %define _pcitable /usr/share/kudzu/pcitable /usr/share/hwdata/pcitable /dev/null
 %define pciids    %find %{_pciids}
 %define pcitable  %find %{_pcitable}
-Requires: kernel, fileutils, findutils, gawk, bash
+Requires: kernel, findutils, gawk, bash
+%define need_aux %(rpm -q --whatprovides /lib/modules/`uname -r`/build/include/linux/auxiliary_bus.h > /dev/null 2>&1 && echo 0 || echo 2)
+%if (%need_aux == 2)
+Requires: auxiliary
+%endif
+
+# Check for existence of %kernel_module_package_buildreqs ...
+%if 0%{?!kernel_module_package_buildreqs:1}
+# ... and provide a suitable definition if it is not defined
+%define kernel_module_package_buildreqs kernel-devel
+%endif
+
+BuildRequires: %kernel_module_package_buildreqs
 
 %description
 This package contains the Intel(R) 40-10 Gigabit Ethernet Connection Network Driver.
@@ -34,14 +46,21 @@ make -C src INSTALL_MOD_PATH=%{buildroot} MANDIR=%{_mandir} modules_install mand
 # Remove modules files that we do not want to include
 find %{buildroot}/lib/modules/ -name 'modules.*' -exec rm -f {} \;
 cd %{buildroot}
-find lib -name "i40e.ko" \
-	-fprintf %{_builddir}/%{name}-%{version}/file.list "/%p\n"
+find lib -name "i40e.ko" -printf "/%p\n" \
+	>%{_builddir}/%{name}-%{version}/file.list
+find lib -name "auxiliary.ko" -printf "/%p\n" \
+	>%{_builddir}/%{name}-%{version}/aux.list
+find lib -path "*extern-symvers/auxiliary.symvers" -printf "/%p\n" \
+	>>%{_builddir}/%{name}-%{version}/aux.list
+find * -name "auxiliary_bus.h" -printf "/%p\n" \
+	>>%{_builddir}/%{name}-%{version}/aux.list
 
 
 %clean
 rm -rf %{buildroot}
 
 %files -f file.list
+
 %defattr(-,root,root)
 %{_mandir}/man7/i40e.7.gz
 %doc COPYING
@@ -75,6 +94,8 @@ bash -s %{pciids} \
 	%{name} \
 <<"END"
 #! /bin/bash
+# Copyright (C) 2017 Intel Corporation
+# For licensing information, see the file 'LICENSE' in the root folder
 # $1 = system pci.ids file to update
 # $2 = system pcitable file to update
 # $3 = file with new entries in pci.ids file format
@@ -380,3 +401,15 @@ else
 	exit -1
 fi
 
+%package -n auxiliary
+Summary: Auxiliary bus driver (backport)
+Version: 1.0.0
+
+%description -n auxiliary
+The Auxiliary bus driver (auxiliary.ko), backported from upstream, for use by kernels that don't have auxiliary bus.
+
+# %if to hide this whole section, causes RPM to not build the subproject at all
+%if (%need_aux == 2)
+%files -n auxiliary -f aux.list
+%doc aux.list
+%endif
