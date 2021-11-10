@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright(c) 2013 - 2018 Intel Corporation. */
+/* Copyright(c) 2013 - 2021 Intel Corporation. */
 
 #ifndef _I40E_HELPER_H_
 #define _I40E_HELPER_H_
@@ -10,6 +10,7 @@
  * i40e_allocate_dma_mem_d - OS specific memory alloc for shared code
  * @hw:   pointer to the HW structure
  * @mem:  ptr to mem struct to fill out
+ * @mtype: memory type identifier (unused)
  * @size: size of memory requested
  * @alignment: what to align the allocation to
  **/
@@ -21,8 +22,13 @@ inline int i40e_allocate_dma_mem_d(struct i40e_hw *hw,
 	struct i40e_pf *nf = (struct i40e_pf *)hw->back;
 
 	mem->size = ALIGN(size, alignment);
+#ifdef HAVE_DMA_ALLOC_COHERENT_ZEROES_MEM
+	mem->va = dma_alloc_coherent(&nf->pdev->dev, mem->size,
+				     &mem->pa, GFP_KERNEL);
+#else
 	mem->va = dma_zalloc_coherent(&nf->pdev->dev, mem->size,
 				      &mem->pa, GFP_KERNEL);
+#endif
 	if (!mem->va)
 		return -ENOMEM;
 

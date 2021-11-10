@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright(c) 2013 - 2018 Intel Corporation. */
+/* Copyright(c) 2013 - 2021 Intel Corporation. */
 
 /* ethtool statistics helpers */
 
@@ -15,11 +15,11 @@
  * of the array using the same _type for calculating the sizeof_stat and
  * stat_offset.
  *
- * The @sizeof_stat is expected to be sizeof(u8), sizeof(u16), sizeof(u32) or
+ * The sizeof_stat is expected to be sizeof(u8), sizeof(u16), sizeof(u32) or
  * sizeof(u64). Other sizes are not expected and will produce a WARN_ONCE from
  * the i40e_add_ethtool_stat() helper function.
  *
- * The @stat_string is interpreted as a format string, allowing formatted
+ * The stat_string is interpreted as a format string, allowing formatted
  * values to be inserted while looping over multiple structures for a given
  * statistics array. Thus, every statistic string in an array should have the
  * same type and number of format specifiers, to be formatted by variadic
@@ -37,7 +37,7 @@ struct i40e_stats {
  */
 #define I40E_STAT(_type, _name, _stat) { \
 	.stat_string = _name, \
-	.sizeof_stat = FIELD_SIZEOF(_type, _stat), \
+	.sizeof_stat = sizeof_field(_type, _stat), \
 	.stat_offset = offsetof(_type, _stat) \
 }
 
@@ -153,7 +153,7 @@ __i40e_add_ethtool_stats(u64 **data, void *pointer,
  * constant stats array and passing the ARRAY_SIZE(). This avoids typos by
  * ensuring that we pass the size associated with the given stats array.
  *
- * The parameter @stats is evaluated twice, so parameters with side effects
+ * The parameter stats is evaluated twice, so parameters with side effects
  * should be avoided.
  **/
 #define i40e_add_ethtool_stats(data, pointer, stats) \
@@ -191,13 +191,12 @@ i40e_add_queue_stats(u64 **data, struct i40e_ring *ring)
 #ifdef HAVE_NDO_GET_STATS64
 	do {
 		start = !ring ? 0 : u64_stats_fetch_begin_irq(&ring->syncp);
-#endif
-		for (i = 0; i < size; i++) {
-			i40e_add_one_ethtool_stat(&(*data)[i], ring,
-						  &stats[i]);
-		}
-#ifdef HAVE_NDO_GET_STATS64
+		for (i = 0; i < size; i++)
+			i40e_add_one_ethtool_stat(&(*data)[i], ring, &stats[i]);
 	} while (ring && u64_stats_fetch_retry_irq(&ring->syncp, start));
+#else
+	for (i = 0; i < size; i++)
+		i40e_add_one_ethtool_stat(&(*data)[i], ring, &stats[i]);
 #endif
 
 	/* Once we successfully copy the stats in, update the data pointer */
@@ -271,21 +270,21 @@ static void __i40e_add_stat_strings(u8 **p, const struct i40e_stats stats[],
 		va_list args;
 
 		va_start(args, size);
-		vsnprintf(*p, ETH_GSTRING_LEN, stats[i].stat_string, args);
+		vsnprintf((char *)*p, ETH_GSTRING_LEN, stats[i].stat_string, args);
 		*p += ETH_GSTRING_LEN;
 		va_end(args);
 	}
 }
 
 /**
- * 40e_add_stat_strings - copy stat strings into ethtool buffer
+ * i40e_add_stat_strings - copy stat strings into ethtool buffer
  * @p: ethtool supplied buffer
  * @stats: stat definitions array
  *
  * Format and copy the strings described by the const static stats value into
  * the buffer pointed at by p.
  *
- * The parameter @stats is evaluated twice, so parameters with side effects
+ * The parameter stats is evaluated twice, so parameters with side effects
  * should be avoided. Additionally, stats must be an array such that
  * ARRAY_SIZE can be called on it.
  **/

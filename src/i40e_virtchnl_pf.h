@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright(c) 2013 - 2018 Intel Corporation. */
+/* Copyright(c) 2013 - 2021 Intel Corporation. */
 
 #ifndef _I40E_VIRTCHNL_PF_H_
 #define _I40E_VIRTCHNL_PF_H_
@@ -17,6 +17,12 @@
 #define I40E_VLAN_MASK			0xFFF
 #define I40E_PRIORITY_MASK		0xE000
 
+#define I40E_MAX_VF_PROMISC_FLAGS	3
+
+#define I40E_VF_STATE_WAIT_COUNT	20
+#define I40E_VFR_WAIT_COUNT		100
+#define I40E_VF_RESET_TIME_MIN		30000000	// time in nsec
+
 /* Various queue ctrls */
 enum i40e_queue_ctrl {
 	I40E_QUEUE_CTRL_UNKNOWN = 0,
@@ -32,18 +38,17 @@ enum i40e_queue_ctrl {
 enum i40e_vf_states {
 	I40E_VF_STATE_INIT = 0,
 	I40E_VF_STATE_ACTIVE,
-	I40E_VF_STATE_IWARPENA,
 	I40E_VF_STATE_DISABLED,
 	I40E_VF_STATE_MC_PROMISC,
 	I40E_VF_STATE_UC_PROMISC,
 	I40E_VF_STATE_PRE_ENABLE,
+	I40E_VF_STATE_RESOURCES_LOADED,
 };
 
 /* VF capabilities */
 enum i40e_vf_capabilities {
 	I40E_VIRTCHNL_VF_CAP_PRIVILEGE = 0,
 	I40E_VIRTCHNL_VF_CAP_L2,
-	I40E_VIRTCHNL_VF_CAP_IWARP,
 };
 
 /* In ADq, max 4 VSI's can be allocated per VF including primary VF VSI.
@@ -57,6 +62,32 @@ struct i40evf_channel {
 	u16 vsi_id; /* VSI ID used by firmware */
 	u16 num_qps; /* number of queue pairs requested by user */
 	u64 max_tx_rate; /* bandwidth rate allocation for VSIs */
+};
+
+/* used for VLAN list 'vm_vlan_list' by VM for trusted and untrusted VF */
+struct i40e_vm_vlan {
+	struct list_head list;
+	s16 vlan;
+	u16 vsi_id;
+};
+
+/* used for MAC list 'vm_mac_list' to recognize MACs added by VM */
+struct i40e_vm_mac {
+	struct list_head list;
+	u8 macaddr[ETH_ALEN];
+};
+
+/* used for following share for given traffic class by VF*/
+struct i40e_vf_tc_info {
+	bool applied;
+	u8 applied_tc_share[I40E_MAX_TRAFFIC_CLASS];
+	u8 requested_tc_share[I40E_MAX_TRAFFIC_CLASS];
+	u16 max_tc_tx_rate[I40E_MAX_TRAFFIC_CLASS];
+};
+
+struct i40e_time_mac {
+	unsigned long time_modified;
+	u8 addr[ETH_ALEN];
 };
 
 /* VF information structure */
@@ -74,9 +105,11 @@ struct i40e_vf {
 	u16 stag;
 
 	struct virtchnl_ether_addr default_lan_addr;
-	u16 port_vlan_id;
+	struct i40e_time_mac legacy_last_added_umac; /* keeps last added MAC address */
+	s16 port_vlan_id;
 	bool pf_set_mac;	/* The VMM admin set the VF MAC address */
 	bool trusted;
+	u64 reset_timestamp;
 
 	/* VSI indices - actual VSI pointers are maintained in the PF structure
 	 * When assigned, these will be non-zero, because VSI 0 is always
@@ -99,33 +132,41 @@ struct i40e_vf {
 	bool link_forced;
 	bool link_up;		/* only valid if VF link is forced */
 #endif
-	bool spoofchk;
-	u16 num_mac;
+	bool mac_anti_spoof;
+	bool vlan_anti_spoof;
 	u16 num_vlan;
 	DECLARE_BITMAP(mirror_vlans, VLAN_N_VID);
 	u16 vlan_rule_id;
 #define I40E_NO_VF_MIRROR	-1
+/* assuming vf ids' range is <0..max_supported> */
+#define I40E_IS_MIRROR_VLAN_ID_VALID(id) ((id) >= 0)
 	u16 ingress_rule_id;
 	int ingress_vlan;
 	u16 egress_rule_id;
 	int egress_vlan;
 	DECLARE_BITMAP(trunk_vlans, VLAN_N_VID);
-	bool mac_anti_spoof;
-	bool vlan_anti_spoof;
-	bool allow_untagged;
+	bool trunk_set_by_pf;
+	bool allow_untagged; /* update filters, when changing value */
 	bool loopback;
 	bool vlan_stripping;
 	u8 promisc_mode;
-
+	u8 bw_share;
+	bool bw_share_applied; /* true if config is applied to the device */
+	bool tc_bw_share_req;
+	bool pf_ctrl_disable; /* bool for PF ctrl of VF enable/disable */
+	u8 queue_type;
+	bool allow_bcast;
+	/* VLAN list created by VM for trusted and untrusted VF */
+	struct list_head vm_vlan_list;
+	/* MAC list created by VM */
+	struct list_head vm_mac_list;
 	/* ADq related variables */
 	bool adq_enabled; /* flag to enable adq */
 	u8 num_tc;
 	struct i40evf_channel ch[I40E_MAX_VF_VSI];
 	struct hlist_head cloud_filter_list;
 	u16 num_cloud_filters;
-
-	/* RDMA Client */
-	struct virtchnl_iwarp_qvlist_info *qvlist_info;
+	struct i40e_vf_tc_info tc_info;
 };
 
 void i40e_free_vfs(struct i40e_pf *pf);
@@ -172,7 +213,11 @@ int i40e_ndo_set_vf_spoofchk(struct net_device *netdev, int vf_id, bool enable);
 
 void i40e_vc_notify_link_state(struct i40e_pf *pf);
 void i40e_vc_notify_reset(struct i40e_pf *pf);
-
+void i40e_restore_all_vfs_msi_state(struct pci_dev *pdev);
+#ifdef HAVE_VF_STATS
+int i40e_get_vf_stats(struct net_device *netdev, int vf_id,
+		      struct ifla_vf_stats *vf_stats);
+#endif
 extern const struct vfd_ops i40e_vfd_ops;
 
 #endif /* _I40E_VIRTCHNL_PF_H_ */

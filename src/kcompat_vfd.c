@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Copyright(c) 2013 - 2018 Intel Corporation. */
+/* Copyright(c) 2013 - 2021 Intel Corporation. */
 
 #include "kcompat.h"
 #include "kcompat_vfd.h"
@@ -8,11 +8,35 @@
 
 const struct vfd_ops *vfd_ops = NULL;
 
+/**
+ * __get_pf_pdev - helper function to get the pdev
+ * @kobj:	kobject passed
+ * @pdev:	PCI device information struct
+ */
+static int __get_pf_pdev(struct kobject *kobj, struct pci_dev **pdev)
+{
+	struct device *dev;
+
+	if (!kobj->parent)
+		return -EINVAL;
+
+	/* get pdev */
+	dev = to_dev(kobj->parent);
+	*pdev = to_pci_dev(dev);
+
+	return 0;
+}
+
+/**
+ * __get_pdev_and_vfid - helper function to get the pdev and the vf id
+ * @kobj:	kobject passed
+ * @pdev:	PCI device information struct
+ * @vf_id:	VF id of the VF under consideration
+ */
 static int __get_pdev_and_vfid(struct kobject *kobj, struct pci_dev **pdev,
 			       int *vf_id)
 {
 	struct device *dev;
-	int ret = 0;
 
 	if (!kobj->parent->parent)
 		return -EINVAL;
@@ -28,6 +52,70 @@ static int __get_pdev_and_vfid(struct kobject *kobj, struct pci_dev **pdev,
 		return -EINVAL;
 	}
 
+	return 0;
+}
+
+/**
+ * __get_tc - helper function to get the pdev and the vf id
+ * @pdev:	PCI device information struct
+ * @tc_kobj:	kobject passed
+ * @tc:		number of extracted TC
+ */
+static int __get_tc(struct pci_dev *pdev, struct kobject *tc_kobj, int *tc)
+{
+	if (kstrtoint(tc_kobj->name, 10, tc) != 0) {
+		dev_err(&pdev->dev, "Failed to convert %s to tc\n",
+			tc_kobj->name);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+/**
+ * __get_vf_tc_pdev - helper function to get the pdev and the vf id
+ * @kobj:	kobject passed
+ * @pdev:	PCI device information struct
+ * @vf_id:	VF id of the VF under consideration
+ * @tc:		number of extracted TC
+ */
+static int __get_vf_tc_pdev(struct kobject *kobj, struct pci_dev **pdev,
+			    int *vf_id, int *tc)
+{
+	int ret;
+
+	if (!kobj->parent->parent)
+		return -EINVAL;
+
+	ret = __get_pdev_and_vfid(kobj->parent->parent, pdev, vf_id);
+	if (ret)
+		goto err;
+
+	ret = __get_tc(*pdev, kobj, tc);
+err:
+	return ret;
+}
+
+/**
+ * __get_pdev_tc - helper function to get the pdev and the vf id
+ * @kobj:	kobject passed
+ * @pdev:	PCI device information struct
+ * @tc:		number of extracted TC
+ */
+static int __get_pdev_tc(struct kobject *kobj, struct pci_dev **pdev, int *tc)
+{
+	int ret;
+
+	/* check for pci_dev kobject */
+	if (!kobj->parent->parent->parent)
+		return -EINVAL;
+
+	ret = __get_pf_pdev(kobj->parent->parent, pdev);
+	if (ret)
+		goto err;
+
+	ret = __get_tc(*pdev, kobj, tc);
+err:
 	return ret;
 }
 
@@ -158,6 +246,63 @@ static int __parse_add_rem_bitmap(struct pci_dev *pdev, const char *buff,
 		dev_err(&pdev->dev, "set %s: invalid input string", attr_name);
 		return -EINVAL;
 	}
+	return 0;
+}
+
+/**
+ * __parse_promisc_input - helper function for promisc attributes
+ * @buff:	buffer with input data
+ * @count:	size of buff
+ * @cmd:	return pointer to cmd into buff
+ * @subcmd:	return pointer to subcmd into buff
+ *
+ * Get the input data for promisc attributes in the form "add/rem mcast/ucast".
+ */
+static int __parse_promisc_input(const char *buff, size_t count,
+				 const char **cmd, const char **subcmd)
+{
+	size_t idx = 0;
+
+	/* Remove start spaces */
+	while (buff[idx] == ' ' && idx < count)
+		idx++;
+
+	/* Parse cmd */
+	if (strncmp(&buff[idx], "add", strlen("add")) == 0) {
+		*cmd = &buff[idx];
+		idx += strlen("add");
+	} else if (strncmp(&buff[idx], "rem", strlen("rem")) == 0) {
+		*cmd = &buff[idx];
+		idx += strlen("rem");
+	} else {
+		return -EINVAL;
+	}
+
+	if (buff[idx++] != ' ')
+		return -EINVAL;
+
+	/* Remove spaces between cmd */
+	while (buff[idx] == ' ' && idx < count)
+		idx++;
+
+	/* Parse subcmd */
+	if (strncmp(&buff[idx], "ucast", strlen("ucast")) == 0) {
+		*subcmd = &buff[idx];
+		idx += strlen("ucast");
+	} else if (strncmp(&buff[idx], "mcast", strlen("mcast")) == 0) {
+		*subcmd = &buff[idx];
+		idx += strlen("mcast");
+	} else {
+		return -EINVAL;
+	}
+
+	/* Remove spaces after subcmd */
+	while ((buff[idx] == ' ' || buff[idx] == '\n') && idx < count)
+		idx++;
+
+	if (idx != count)
+		return -EINVAL;
+
 	return 0;
 }
 
@@ -400,6 +545,10 @@ static ssize_t vfd_egress_mirror_store(struct kobject *kobj,
 					   &data_new, &data_old);
 	if (ret)
 		return ret;
+	if(data_new == vf_id) {
+		dev_err(&pdev->dev, "VF %d: Setting egress_mirror to itself is not allowed\n", vf_id);
+		return -EINVAL;
+	}
 
 	if (data_new != data_old)
 		ret = vfd_ops->set_egress_mirror(pdev, vf_id, data_new);
@@ -470,6 +619,10 @@ static ssize_t vfd_ingress_mirror_store(struct kobject *kobj,
 					   &data_new, &data_old);
 	if (ret)
 		return ret;
+	if(data_new == vf_id) {
+		dev_err(&pdev->dev, "VF %d: Setting ingress_mirror to itself is not allowed\n", vf_id);
+		return -EINVAL;
+	}
 
 	if (data_new != data_old)
 		ret = vfd_ops->set_ingress_mirror(pdev, vf_id, data_new);
@@ -488,7 +641,7 @@ static ssize_t vfd_mac_anti_spoof_show(struct kobject *kobj,
 				       char *buff)
 {
 	struct pci_dev *pdev;
-	int vf_id, ret = 0;
+	int vf_id, ret;
 	bool data;
 
 	if (!vfd_ops->get_mac_anti_spoof)
@@ -524,9 +677,9 @@ static ssize_t vfd_mac_anti_spoof_store(struct kobject *kobj,
 					struct kobj_attribute *attr,
 					const char *buff, size_t count)
 {
-	struct pci_dev *pdev;
-	int vf_id, ret = 0;
 	bool data_new, data_old;
+	struct pci_dev *pdev;
+	int vf_id, ret;
 
 	if (!vfd_ops->set_mac_anti_spoof || !vfd_ops->get_mac_anti_spoof)
 		return -EOPNOTSUPP;
@@ -560,7 +713,7 @@ static ssize_t vfd_vlan_anti_spoof_show(struct kobject *kobj,
 					char *buff)
 {
 	struct pci_dev *pdev;
-	int vf_id, ret = 0;
+	int vf_id, ret;
 	bool data;
 
 	if (!vfd_ops->get_vlan_anti_spoof)
@@ -596,9 +749,9 @@ static ssize_t vfd_vlan_anti_spoof_store(struct kobject *kobj,
 					 struct kobj_attribute *attr,
 					 const char *buff, size_t count)
 {
-	struct pci_dev *pdev;
-	int vf_id, ret = 0;
 	bool data_new, data_old;
+	struct pci_dev *pdev;
+	int vf_id, ret;
 
 	if (!vfd_ops->set_vlan_anti_spoof || !vfd_ops->get_vlan_anti_spoof)
 		return -EOPNOTSUPP;
@@ -839,6 +992,9 @@ static ssize_t vfd_mac_store(struct kobject *kobj,
 static ssize_t vfd_mac_list_show(struct kobject *kobj,
 				 struct kobj_attribute *attr, char *buff)
 {
+	unsigned int mac_num_allowed, mac_num_list, mac_num_count;
+	const char *overflow_msg = "... and more\n";
+	unsigned int mac_msg_len = 3*ETH_ALEN;
 	struct list_head *pos, *n;
 	struct pci_dev *pdev;
 	int vf_id, ret;
@@ -856,27 +1012,44 @@ static ssize_t vfd_mac_list_show(struct kobject *kobj,
 	if (ret < 0)
 		goto err_free;
 
+	mac_num_list = 0;
+	mac_num_count = 0;
+	list_for_each_safe(pos, n, &mac_list)
+		mac_num_list++;
+
+	mac_num_allowed = (PAGE_SIZE - 1) / mac_msg_len;
+	if (mac_num_list > mac_num_allowed)
+		mac_num_allowed = (PAGE_SIZE - 1 - strlen(overflow_msg)) /
+				   mac_msg_len;
+
 	written = buff;
-        list_for_each_safe(pos, n, &mac_list) {
-                struct vfd_macaddr *mac = NULL;
+	list_for_each_safe(pos, n, &mac_list) {
+		struct vfd_macaddr *mac = NULL;
 
-                mac = list_entry(pos, struct vfd_macaddr, list);
-		if (list_is_last(pos, &mac_list))
-			ret += scnprintf(written, PAGE_SIZE, "%pM\n", mac->mac);
-		else
-			ret += scnprintf(written, PAGE_SIZE, "%pM,", mac->mac);
-
-		written += 3*ETH_ALEN;
-        }
+		mac_num_count++;
+		mac = list_entry(pos, struct vfd_macaddr, list);
+		if (mac_num_count > mac_num_allowed) {
+			ret += scnprintf(written, PAGE_SIZE - ret,
+					 "%s", overflow_msg);
+			goto err_free;
+		} else if (list_is_last(pos, &mac_list)) {
+			ret += scnprintf(written, PAGE_SIZE - ret,
+					 "%pM\n", mac->mac);
+		} else {
+			ret += scnprintf(written, PAGE_SIZE - ret,
+					 "%pM,", mac->mac);
+		}
+		written += mac_msg_len;
+	}
 
 err_free:
-        list_for_each_safe(pos, n, &mac_list) {
-                struct vfd_macaddr *mac = NULL;
+	list_for_each_safe(pos, n, &mac_list) {
+		struct vfd_macaddr *mac = NULL;
 
-                mac = list_entry(pos, struct vfd_macaddr, list);
-                list_del(pos);
-                kfree(mac);
-        }
+		mac = list_entry(pos, struct vfd_macaddr, list);
+		list_del(pos);
+		kfree(mac);
+	}
 	return ret;
 }
 
@@ -1002,6 +1175,8 @@ static ssize_t vfd_promisc_show(struct kobject *kobj,
 		ret = scnprintf(buff, PAGE_SIZE, "ucast\n");
 	else if (data == VFD_PROMISC_MULTICAST)
 		ret = scnprintf(buff, PAGE_SIZE, "mcast\n");
+	else if (data == (VFD_PROMISC_UNICAST | VFD_PROMISC_MULTICAST))
+		ret = scnprintf(buff, PAGE_SIZE, "ucast, mcast\n");
 	else if (data == VFD_PROMISC_OFF)
 		ret = scnprintf(buff, PAGE_SIZE, "off\n");
 
@@ -1019,9 +1194,11 @@ static ssize_t vfd_promisc_store(struct kobject *kobj,
 				 struct kobj_attribute *attr,
 				 const char *buff, size_t count)
 {
-	u8 data_new = 0, data_old;
+	u8 data_new, data_old;
 	struct pci_dev *pdev;
-	int vf_id, ret = 0;
+	const char *subcmd;
+	const char *cmd;
+	int vf_id, ret;
 
 	if (!vfd_ops->get_promisc || !vfd_ops->set_promisc)
 		return -EOPNOTSUPP;
@@ -1034,19 +1211,26 @@ static ssize_t vfd_promisc_store(struct kobject *kobj,
 	if (ret < 0)
 		return ret;
 
-	if (strstr(buff, "add")) {
-		if (strstr(buff, "ucast"))
-			data_new |= VFD_PROMISC_UNICAST;
-		if (strstr(buff, "mcast"))
-			data_new |= VFD_PROMISC_MULTICAST;
-	} else if (strstr(buff, "rem")) {
-		if (strstr(buff, "ucast"))
-			data_new &= ~VFD_PROMISC_UNICAST;
-		if (strstr(buff, "mcast"))
-			data_new &= ~VFD_PROMISC_MULTICAST;
+	ret = __parse_promisc_input(buff, count, &cmd, &subcmd);
+	if (ret)
+		goto promisc_err;
+
+	if (strncmp(cmd, "add", strlen("add")) == 0) {
+		if (strncmp(subcmd, "ucast", strlen("ucast")) == 0)
+			data_new = data_old | VFD_PROMISC_UNICAST;
+		else if (strncmp(subcmd, "mcast", strlen("mcast")) == 0)
+			data_new = data_old | VFD_PROMISC_MULTICAST;
+		else
+			goto promisc_err;
+	} else if (strncmp(cmd, "rem", strlen("rem")) == 0) {
+		if (strncmp(subcmd, "ucast", strlen("ucast")) == 0)
+			data_new = data_old & ~VFD_PROMISC_UNICAST;
+		else if (strncmp(subcmd, "mcast", strlen("mcast")) == 0)
+			data_new = data_old & ~VFD_PROMISC_MULTICAST;
+		else
+			goto promisc_err;
 	} else {
-		dev_err(&pdev->dev, "Invalid input string");
-		return -EINVAL;
+		goto promisc_err;
 	}
 
 	if (data_new != data_old)
@@ -1054,6 +1238,9 @@ static ssize_t vfd_promisc_store(struct kobject *kobj,
 
 	return ret ? ret : count;
 
+promisc_err:
+	dev_err(&pdev->dev, "Invalid input string");
+	return -EINVAL;
 }
 
 /**
@@ -1159,6 +1346,12 @@ static ssize_t vfd_link_state_show(struct kobject *kobj,
 		case VFD_LINK_SPEED_1GB:
 			speed_str = "1 Gbps";
 			break;
+		case VFD_LINK_SPEED_2_5GB:
+			speed_str = "2.5 Gbps";
+			break;
+		case VFD_LINK_SPEED_5GB:
+			speed_str = "5 Gbps";
+			break;
 		case VFD_LINK_SPEED_10GB:
 			speed_str = "10 Gbps";
 			break;
@@ -1226,6 +1419,78 @@ static ssize_t vfd_link_state_store(struct kobject *kobj,
 }
 
 /**
+ * vfd_enable_show - handler for VF enable/disable show function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer for data
+ **/
+static ssize_t vfd_enable_show(struct kobject *kobj,
+			       struct kobj_attribute *attr,
+			       char *buff)
+{
+	struct pci_dev *pdev;
+	int vf_id, ret;
+	bool data;
+
+	if (!vfd_ops->get_vf_enable)
+		return -EOPNOTSUPP;
+
+	ret = __get_pdev_and_vfid(kobj, &pdev, &vf_id);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_vf_enable(pdev, vf_id, &data);
+	if (ret < 0)
+		return ret;
+
+	if (data)
+		ret = scnprintf(buff, PAGE_SIZE, "on\n");
+	else
+		ret = scnprintf(buff, PAGE_SIZE, "off\n");
+
+	return ret;
+}
+
+/**
+ * vfd_enable_store - handler for VF enable/disable store function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer with input data
+ * @count:	size of buff
+ *
+ * On success return count, indicating that we used the whole buffer. On
+ * failure return a negative error condition.
+ **/
+static ssize_t vfd_enable_store(struct kobject *kobj,
+				struct kobj_attribute *attr,
+				const char *buff, size_t count)
+{
+	bool data_new, data_old;
+	struct pci_dev *pdev;
+	int vf_id, ret;
+
+	if (!vfd_ops->set_vf_enable || !vfd_ops->get_vf_enable)
+		return -EOPNOTSUPP;
+
+	ret = __get_pdev_and_vfid(kobj, &pdev, &vf_id);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_vf_enable(pdev, vf_id, &data_old);
+	if (ret < 0)
+		return ret;
+
+	ret = __parse_bool_data(pdev, buff, "enable", &data_new);
+	if (ret)
+		return ret;
+
+	if (data_new != data_old)
+		ret = vfd_ops->set_vf_enable(pdev, vf_id, data_new);
+
+	return ret ? ret : count;
+}
+
+/**
  * vfd_max_tx_rate_show - handler for mac_tx_rate show function
  * @kobj:	kobject being called
  * @attr:	struct kobj_attribute
@@ -1234,10 +1499,23 @@ static ssize_t vfd_link_state_store(struct kobject *kobj,
 static ssize_t vfd_max_tx_rate_show(struct kobject *kobj,
 				    struct kobj_attribute *attr, char *buff)
 {
+	unsigned int max_tx_rate;
+	struct pci_dev *pdev;
+	int vf_id, ret;
+
 	if (!vfd_ops->get_max_tx_rate)
 		return -EOPNOTSUPP;
 
-	return vfd_ops->get_max_tx_rate(kobj, attr, buff);
+	ret = __get_pdev_and_vfid(kobj, &pdev, &vf_id);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_max_tx_rate(pdev, vf_id, &max_tx_rate);
+	if (ret < 0)
+		return ret;
+
+	ret = scnprintf(buff, PAGE_SIZE, "%u\n", max_tx_rate);
+	return ret;
 }
 
 /**
@@ -1251,10 +1529,27 @@ static ssize_t vfd_max_tx_rate_store(struct kobject *kobj,
 				     struct kobj_attribute *attr,
 				     const char *buff, size_t count)
 {
+	unsigned int max_tx_rate;
+	struct pci_dev *pdev;
+	int vf_id, ret;
+
 	if (!vfd_ops->set_max_tx_rate)
 		return -EOPNOTSUPP;
 
-	return vfd_ops->set_max_tx_rate(kobj, attr, buff, count);
+	ret = __get_pdev_and_vfid(kobj, &pdev, &vf_id);
+	if (ret)
+		return ret;
+
+	ret = kstrtouint(buff, 10, &max_tx_rate);
+	if (ret) {
+		dev_err(&pdev->dev,
+			"Invalid argument, not a decimal number: %s", buff);
+		return ret;
+	}
+
+	ret = vfd_ops->set_max_tx_rate(pdev, vf_id, &max_tx_rate);
+
+	return ret ? ret : count;
 }
 
 /**
@@ -1290,38 +1585,6 @@ static ssize_t vfd_min_tx_rate_store(struct kobject *kobj,
 }
 
 /**
- * vfd_spoofcheck_show - handler for spoofcheck show function
- * @kobj:	kobject being called
- * @attr:	struct kobj_attribute
- * @buff:	buffer for data
- **/
-static ssize_t vfd_spoofcheck_show(struct kobject *kobj,
-				   struct kobj_attribute *attr, char *buff)
-{
-	if (!vfd_ops->get_spoofcheck)
-		return -EOPNOTSUPP;
-
-	return vfd_ops->get_spoofcheck(kobj, attr, buff);
-}
-
-/**
- * vfd_spoofcheck_store - handler for spoofcheck store function
- * @kobj:	kobject being called
- * @attr:	struct kobj_attribute
- * @buff:	buffer with input data
- * @count:	size of buff
- **/
-static ssize_t vfd_spoofcheck_store(struct kobject *kobj,
-				    struct kobj_attribute *attr,
-				    const char *buff, size_t count)
-{
-	if (!vfd_ops->set_spoofcheck)
-		return -EOPNOTSUPP;
-
-	return vfd_ops->set_spoofcheck(kobj, attr, buff, count);
-}
-
-/**
  * vfd_trust_show - handler for trust show function
  * @kobj:	kobject being called
  * @attr:	struct kobj_attribute
@@ -1330,10 +1593,27 @@ static ssize_t vfd_spoofcheck_store(struct kobject *kobj,
 static ssize_t vfd_trust_show(struct kobject *kobj,
 			      struct kobj_attribute *attr, char *buff)
 {
-	if (!vfd_ops->get_trust)
+	struct pci_dev *pdev;
+	int vf_id, ret;
+	bool data;
+
+	if (!vfd_ops->get_trust_state)
 		return -EOPNOTSUPP;
 
-	return vfd_ops->get_trust(kobj, attr, buff);
+	ret = __get_pdev_and_vfid(kobj, &pdev, &vf_id);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_trust_state(pdev, vf_id, &data);
+	if (ret)
+		return ret;
+
+	if (data)
+		ret = scnprintf(buff, PAGE_SIZE, "on\n");
+	else
+		ret = scnprintf(buff, PAGE_SIZE, "off\n");
+
+	return ret;
 }
 
 /**
@@ -1347,42 +1627,63 @@ static ssize_t vfd_trust_store(struct kobject *kobj,
 			       struct kobj_attribute *attr,
 			       const char *buff, size_t count)
 {
-	if (!vfd_ops->set_trust)
+	bool data_new, data_old;
+	struct pci_dev *pdev;
+	int vf_id, ret;
+
+	if (!vfd_ops->set_trust_state || !vfd_ops->get_trust_state)
 		return -EOPNOTSUPP;
 
-	return vfd_ops->set_trust(kobj, attr, buff, count);
+	ret = __get_pdev_and_vfid(kobj, &pdev, &vf_id);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_trust_state(pdev, vf_id, &data_old);
+	if (ret)
+		return ret;
+
+	ret = __parse_bool_data(pdev, buff, "trust", &data_new);
+	if (ret)
+		return ret;
+
+	if (data_new != data_old)
+		ret = vfd_ops->set_trust_state(pdev, vf_id, data_new);
+
+	return ret ? ret : count;
 }
 
 /**
- * vfd_vlan_show - handler for vlan show function
- * @kobj:	kobject being called
- * @attr:	struct kobj_attribute
- * @buff:	buffer for data
- **/
-static ssize_t vfd_vlan_show(struct kobject *kobj,
-			     struct kobj_attribute *attr, char *buff)
-{
-	if (!vfd_ops->get_vlan)
-		return -EOPNOTSUPP;
-
-	return vfd_ops->get_vlan(kobj, attr, buff);
-}
-
-/**
- * vfd_vlan_store - handler for vlan store function
+ * vfd_reset_stats_store - handler for reset stats store function
  * @kobj:	kobject being called
  * @attr:	struct kobj_attribute
  * @buff:	buffer with input data
  * @count:	size of buff
  **/
-static ssize_t vfd_vlan_store(struct kobject *kobj,
-			      struct kobj_attribute *attr,
-			      const char *buff, size_t count)
+static ssize_t vfd_reset_stats_store(struct kobject *kobj,
+				     struct kobj_attribute *attr,
+				     const char *buff, size_t count)
 {
-	if (!vfd_ops->set_vlan)
+	int vf_id, reset, ret;
+	struct pci_dev *pdev;
+
+	if (!vfd_ops->reset_stats)
 		return -EOPNOTSUPP;
 
-	return vfd_ops->set_vlan(kobj, attr, buff, count);
+	ret = __get_pdev_and_vfid(kobj, &pdev, &vf_id);
+	if (ret)
+		return ret;
+	ret = kstrtoint(buff, 10, &reset);
+	if (ret) {
+		dev_err(&pdev->dev, "Invalid input\n");
+		return ret;
+	}
+
+	if (reset != 1)
+		return -EINVAL;
+
+	ret = vfd_ops->reset_stats(pdev, vf_id);
+
+	return ret ? ret : count;
 }
 
 /**
@@ -1617,6 +1918,887 @@ static ssize_t vfd_tx_errors_show(struct kobject *kobj,
 	return ret;
 }
 
+/**
+ * qos_share_show - handler for the bw_share show function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer for data
+ **/
+static ssize_t qos_share_show(struct kobject *kobj,
+			      struct kobj_attribute *attr, char *buff)
+{
+	struct pci_dev *pdev;
+	int vf_id, ret;
+	u8 data = 0;
+
+	if (!vfd_ops->get_vf_bw_share)
+		return -EOPNOTSUPP;
+
+	ret = __get_pdev_and_vfid(kobj->parent, &pdev, &vf_id);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_vf_bw_share(pdev, vf_id, &data);
+	if (ret < 0) {
+		dev_err(&pdev->dev, "No bw share applied for VF %d\n", vf_id);
+		return ret;
+	}
+
+	ret = scnprintf(buff, PAGE_SIZE, "%u\n", data);
+
+	return ret;
+}
+
+/**
+ * qos_share_store - handler for the bw_share store function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer with input data
+ * @count:	size of buff
+ **/
+static ssize_t qos_share_store(struct kobject *kobj,
+			       struct kobj_attribute *attr,
+			       const char *buff, size_t count)
+{
+	struct pci_dev *pdev;
+	int vf_id, ret;
+	u8 bw_share;
+
+	if (!vfd_ops->set_vf_bw_share)
+		return -EOPNOTSUPP;
+
+	ret = __get_pdev_and_vfid(kobj->parent, &pdev, &vf_id);
+	if (ret)
+		return ret;
+
+	/* parse the bw_share */
+	ret = kstrtou8(buff, 10, &bw_share);
+	if (ret) {
+		dev_err(&pdev->dev, "Invalid input\n");
+		return ret;
+	}
+
+	/* check that the BW is between 1 and 100 */
+	if (bw_share < 1 || bw_share > 100) {
+		dev_err(&pdev->dev, "BW share has to be between 1-100\n");
+		return -EINVAL;
+	}
+	ret = vfd_ops->set_vf_bw_share(pdev, vf_id, bw_share);
+	return ret ? ret : count;
+}
+
+/**
+ * pf_qos_apply_store - handler for pf qos apply store function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer with input data
+ * @count:	size of buff
+ **/
+static ssize_t pf_qos_apply_store(struct kobject *kobj,
+				  struct kobj_attribute *attr,
+				  const char *buff, size_t count)
+{
+	int ret, apply;
+	struct pci_dev *pdev;
+
+	if (!vfd_ops->set_pf_qos_apply)
+		return -EOPNOTSUPP;
+
+	ret = __get_pf_pdev(kobj->parent, &pdev);
+	if (ret)
+		return ret;
+
+	ret = kstrtoint(buff, 10, &apply);
+	if (ret) {
+		dev_err(&pdev->dev,
+			"Invalid input\n");
+		return ret;
+	}
+
+	if (apply != 1)
+		return -EINVAL;
+
+	ret = vfd_ops->set_pf_qos_apply(pdev);
+
+	return ret ? ret : count;
+}
+
+/**
+ * pf_ingress_mirror_show - handler for PF ingress mirror show function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer for data
+ **/
+static ssize_t pf_ingress_mirror_show(struct kobject *kobj,
+				      struct kobj_attribute *attr, char *buff)
+{
+	struct pci_dev *pdev;
+	int ret, data;
+
+	if (!vfd_ops->get_pf_ingress_mirror)
+		return -EOPNOTSUPP;
+
+	ret = __get_pf_pdev(kobj, &pdev);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_pf_ingress_mirror(pdev, &data);
+	if (ret < 0)
+		return ret;
+
+	if (data == VFD_INGRESS_MIRROR_OFF)
+		ret = scnprintf(buff, PAGE_SIZE, "off\n");
+	else
+		ret = scnprintf(buff, PAGE_SIZE, "%u\n", data);
+
+	return ret;
+}
+
+/**
+ * pf_ingress_mirror_store - handler for pf ingress mirror store function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer with input data
+ * @count:	size of buff
+ **/
+static ssize_t pf_ingress_mirror_store(struct kobject *kobj,
+				       struct kobj_attribute *attr,
+				       const char *buff, size_t count)
+{
+	int data_new, data_old;
+	struct pci_dev *pdev;
+	int ret;
+
+	if (!vfd_ops->set_pf_ingress_mirror || !vfd_ops->get_pf_ingress_mirror)
+		return -EOPNOTSUPP;
+
+	ret = __get_pf_pdev(kobj, &pdev);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_pf_ingress_mirror(pdev, &data_old);
+	if (ret < 0)
+		return ret;
+
+	ret = __parse_egress_ingress_input(pdev, buff, "ingress_mirror",
+					   &data_new, &data_old);
+	if (ret)
+		return ret;
+
+	if (data_new != data_old)
+		ret = vfd_ops->set_pf_ingress_mirror(pdev, data_new);
+
+	return ret ? ret : count;
+}
+
+/**
+ * pf_egress_mirror_show - handler for PF egress mirror show function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer for data
+ **/
+static ssize_t pf_egress_mirror_show(struct kobject *kobj,
+				     struct kobj_attribute *attr, char *buff)
+{
+	struct pci_dev *pdev;
+	int ret, data;
+
+	if (!vfd_ops->get_pf_egress_mirror)
+		return -EOPNOTSUPP;
+
+	ret = __get_pf_pdev(kobj, &pdev);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_pf_egress_mirror(pdev, &data);
+	if (ret < 0)
+		return ret;
+
+	if (data == VFD_EGRESS_MIRROR_OFF)
+		ret = scnprintf(buff, PAGE_SIZE, "off\n");
+	else
+		ret = scnprintf(buff, PAGE_SIZE, "%u\n", data);
+
+	return ret;
+}
+
+/**
+ * pf_egress_mirror_store - handler for pf egress mirror store function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer with input data
+ * @count:	size of buff
+ **/
+static ssize_t pf_egress_mirror_store(struct kobject *kobj,
+				      struct kobj_attribute *attr,
+				      const char *buff, size_t count)
+{
+	int data_new, data_old;
+	struct pci_dev *pdev;
+	int ret;
+
+	if (!vfd_ops->set_pf_egress_mirror || !vfd_ops->get_pf_egress_mirror)
+		return -EOPNOTSUPP;
+
+	ret = __get_pf_pdev(kobj, &pdev);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_pf_egress_mirror(pdev, &data_old);
+	if (ret < 0)
+		return ret;
+
+	ret = __parse_egress_ingress_input(pdev, buff, "egress_mirror",
+					   &data_new, &data_old);
+	if (ret)
+		return ret;
+
+	if (data_new != data_old)
+		ret = vfd_ops->set_pf_egress_mirror(pdev, data_new);
+
+	return ret ? ret : count;
+}
+
+/**
+ * pf_tpid_show - handler for pf tpid show function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer for data
+ **/
+static ssize_t pf_tpid_show(struct kobject *kobj,
+			    struct kobj_attribute *attr, char *buff)
+{
+	struct pci_dev *pdev;
+	u16 data;
+	int ret;
+
+	if (!vfd_ops->get_pf_tpid)
+		return -EOPNOTSUPP;
+
+	ret = __get_pf_pdev(kobj, &pdev);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_pf_tpid(pdev, &data);
+	if (ret < 0)
+		return ret;
+
+	ret = scnprintf(buff, PAGE_SIZE, "%x\n", data);
+
+	return ret;
+}
+
+/**
+ * pf_tpid_store - handler for pf tpid store function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer with input data
+ * @count:	size of buff
+ **/
+static ssize_t pf_tpid_store(struct kobject *kobj,
+			     struct kobj_attribute *attr,
+			     const char *buff, size_t count)
+{
+	struct pci_dev *pdev;
+	u16 data;
+	int ret;
+
+	if (!vfd_ops->set_pf_tpid)
+		return -EOPNOTSUPP;
+
+	ret = __get_pf_pdev(kobj, &pdev);
+	if (ret)
+		return ret;
+
+	ret = kstrtou16(buff, 16, &data);
+	if (ret) {
+		dev_err(&pdev->dev, "Invalid input\n");
+		return ret;
+	}
+
+	ret = vfd_ops->set_pf_tpid(pdev, data);
+
+	return ret ? ret : count;
+}
+
+/**
+ * vfd_num_queues_show - handler for num_queues show function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer for data
+ **/
+static ssize_t vfd_num_queues_show(struct kobject *kobj,
+				   struct kobj_attribute *attr, char *buff)
+{
+	struct pci_dev *pdev;
+	int vf_id, ret;
+	int data;
+
+	if (!vfd_ops->get_num_queues)
+		return -EOPNOTSUPP;
+
+	ret = __get_pdev_and_vfid(kobj, &pdev, &vf_id);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_num_queues(pdev, vf_id, &data);
+	if (ret)
+		return ret;
+
+	ret = scnprintf(buff, PAGE_SIZE, "%d\n", data);
+
+	return ret;
+}
+
+/**
+ * vfd_num_queues_store - handler for num_queues store function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer with input data
+ * @count:	size of buff
+ **/
+static ssize_t vfd_num_queues_store(struct kobject *kobj,
+				    struct kobj_attribute *attr,
+				    const char *buff, size_t count)
+{
+	int data_new, data_old;
+	struct pci_dev *pdev;
+	int vf_id, ret;
+
+	if (!vfd_ops->set_num_queues)
+		return -EOPNOTSUPP;
+
+	ret = __get_pdev_and_vfid(kobj, &pdev, &vf_id);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_num_queues(pdev, vf_id, &data_old);
+	if (ret)
+		return ret;
+
+	ret = kstrtoint(buff, 10, &data_new);
+	if (ret) {
+		dev_err(&pdev->dev, "Invalid input\n");
+		return ret;
+	}
+
+	if (data_new < 1) {
+		dev_err(&pdev->dev, "VF queue count must be at least 1\n");
+		return -EINVAL;
+	}
+
+	if (data_new != data_old)
+		ret = vfd_ops->set_num_queues(pdev, vf_id, data_new);
+
+	return ret ? ret : count;
+}
+
+/**
+ * vfd_queue_type_show - handler for queue_type show function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer for data
+ **/
+static ssize_t vfd_queue_type_show(struct kobject *kobj,
+				   struct kobj_attribute *attr, char *buff)
+{
+	struct pci_dev *pdev;
+	int vf_id, ret = 0;
+	u8 data;
+
+	if (!vfd_ops->get_queue_type)
+		return -EOPNOTSUPP;
+
+	ret = __get_pdev_and_vfid(kobj, &pdev, &vf_id);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_queue_type(pdev, vf_id, &data);
+	if (ret)
+		return ret;
+
+	ret = scnprintf(buff, PAGE_SIZE, "%d\n", data);
+
+	return ret;
+}
+
+/**
+ * vfd_queue_type_store - handler for queue_type store function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer with input data
+ * @count:	size of buff
+ **/
+static ssize_t vfd_queue_type_store(struct kobject *kobj,
+				    struct kobj_attribute *attr,
+				    const char *buff, size_t count)
+{
+	// the setting will be updated via different sysfs
+	return -EOPNOTSUPP;
+}
+
+/**
+ * vfd_allow_bcast_show - handler for VF allow broadcast show function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer for data
+ **/
+static ssize_t vfd_allow_bcast_show(struct kobject *kobj,
+				    struct kobj_attribute *attr,
+				    char *buff)
+{
+	struct pci_dev *pdev;
+	int vf_id, ret;
+	bool data;
+
+	if (!vfd_ops->get_allow_bcast)
+		return -EOPNOTSUPP;
+
+	ret = __get_pdev_and_vfid(kobj, &pdev, &vf_id);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_allow_bcast(pdev, vf_id, &data);
+	if (ret < 0)
+		return ret;
+
+	if (data)
+		ret = scnprintf(buff, PAGE_SIZE, "on\n");
+	else
+		ret = scnprintf(buff, PAGE_SIZE, "off\n");
+
+	return ret;
+}
+
+/**
+ * vfd_allow_bcast_store - handler for VF allow broadcast store function
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer with input data
+ * @count:	size of buff
+ *
+ * On success return count, indicating that we used the whole buffer. On
+ * failure return a negative error condition.
+ **/
+static ssize_t vfd_allow_bcast_store(struct kobject *kobj,
+				     struct kobj_attribute *attr,
+				     const char *buff, size_t count)
+{
+	bool data_new, data_old;
+	struct pci_dev *pdev;
+	int vf_id, ret;
+
+	if (!vfd_ops->set_allow_bcast || !vfd_ops->get_allow_bcast)
+		return -EOPNOTSUPP;
+
+	ret = __get_pdev_and_vfid(kobj, &pdev, &vf_id);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_allow_bcast(pdev, vf_id, &data_old);
+	if (ret < 0)
+		return ret;
+
+	ret = __parse_bool_data(pdev, buff, "allow_bcast", &data_new);
+	if (ret)
+		return ret;
+
+	if (data_new != data_old)
+		ret = vfd_ops->set_allow_bcast(pdev, vf_id, data_new);
+
+	return ret ? ret : count;
+}
+
+/**
+ * round_nearest_quanta - helper function for calculating quanta
+ * @num:	Number to be rounded
+ *
+ * Calculates nearest multiple of 50, which is quanta accepted by FW.
+ * For 0 it returns 0, which means unlimitied bandwidth
+ **/
+static int round_nearest_quanta(int num)
+{
+	static const int base = 50;
+
+	if (!(num % base) || !num)
+		return num;
+	else
+		return num + base - (num % base);
+}
+
+/**
+ * pf_qos_tc_priority_show - handler for PF's priority for given TC show
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer for data
+ **/
+static ssize_t pf_qos_tc_priority_show(struct kobject *kobj,
+				       struct kobj_attribute *attr, char *buff)
+{
+	struct pci_dev *pdev;
+	int i, tc, ret;
+	char *written;
+	u8 prio;
+
+	/* check if option is implemented in vfd_ops*/
+	if (!vfd_ops->set_pf_qos_tc_priority ||
+	    !vfd_ops->get_pf_qos_tc_priority)
+		return -EOPNOTSUPP;
+
+	ret = __get_pdev_tc(kobj, &pdev, &tc);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_pf_qos_tc_priority(pdev, tc, &prio);
+
+	if (!prio)
+		return ret;
+
+	written = buff;
+	/* iterate over prio bits */
+	for (i = 0; i < 8; i++) {
+		if (BIT(i) & prio) {
+			ret += scnprintf(written, PAGE_SIZE, "%d,", i);
+			written += 2;
+		}
+	}
+	ret += scnprintf(written, PAGE_SIZE, "\n");
+	return ret;
+}
+
+/**
+ * pf_qos_tc_priority_store - handler for PF's priority for given TC store
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer with input data
+ * @count:	size of buff
+ *
+ * On success return count, indicating that we used the whole buffer. On
+ * failure return a negative error condition.
+ **/
+static ssize_t pf_qos_tc_priority_store(struct kobject *kobj,
+					struct kobj_attribute *attr,
+					const char *buff, size_t count)
+{
+	struct pci_dev *pdev;
+	int tc, tmp, ret;
+	char *tok, *str;
+	u8 prio = 0;
+
+	/* check if option is implemented in vfd_ops*/
+	if (!vfd_ops->set_pf_qos_tc_priority ||
+	    !vfd_ops->get_pf_qos_tc_priority)
+		return -EOPNOTSUPP;
+
+	str = kzalloc(sizeof(*str) * count + 1, GFP_KERNEL);
+	if (!str)
+		return -ENOMEM;
+
+	strncpy(str, buff, count);
+	ret = __get_pdev_tc(kobj, &pdev, &tc);
+	if (ret)
+		goto err;
+
+	while ((tok = strsep(&str, ",")) != NULL) {
+		tok = strim(tok);
+
+		ret = kstrtoint(tok, 10, &tmp);
+		if (ret) {
+			dev_err(&pdev->dev, "Invalid input\n");
+			goto err;
+		}
+
+		if (tmp < 0 || tmp >= VFD_NUM_TC) {
+			dev_err(&pdev->dev, "Only numbers 0-7 are allowed.\n");
+			ret = -EINVAL;
+			goto err;
+		}
+		prio |= BIT(tmp);
+	}
+	vfd_ops->set_pf_qos_tc_priority(pdev, tc, prio);
+
+	kfree(str);
+	return count;
+
+err:
+	kfree(str);
+	return ret;
+}
+
+/**
+ * pf_qos_tc_lsp_show - handler for PF's link strict priority for given TC show
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer for data
+ **/
+static ssize_t pf_qos_tc_lsp_show(struct kobject *kobj,
+				  struct kobj_attribute *attr, char *buff)
+{
+	struct pci_dev *pdev;
+	int tc, ret;
+	bool lsp;
+
+	/* check if option is implemented in vfd_ops*/
+	if (!vfd_ops->set_pf_qos_tc_lsp || !vfd_ops->get_pf_qos_tc_lsp)
+		return -EOPNOTSUPP;
+
+	ret = __get_pdev_tc(kobj, &pdev, &tc);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_pf_qos_tc_lsp(pdev, tc, &lsp);
+	if (ret)
+		return ret;
+
+	ret = scnprintf(buff, PAGE_SIZE, lsp ? "on\n" : "off\n");
+
+	return ret;
+}
+
+/**
+ * pf_qos_tc_lsp_store - handler for PF link strict priority for given TC store
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer with input data
+ * @count:	size of buff
+ *
+ * On success return count, indicating that we used the whole buffer. On
+ * failure return a negative error condition.
+ **/
+static ssize_t pf_qos_tc_lsp_store(struct kobject *kobj,
+				   struct kobj_attribute *attr,
+				   const char *buff, size_t count)
+{
+	struct pci_dev *pdev;
+	int tc, ret;
+	bool lsp;
+
+	/* check if option is implemented in vfd_ops*/
+	if (!vfd_ops->set_pf_qos_tc_lsp || !vfd_ops->get_pf_qos_tc_lsp)
+		return -EOPNOTSUPP;
+
+	ret = __get_pdev_tc(kobj, &pdev, &tc);
+	if (ret)
+		return ret;
+
+	__parse_bool_data(pdev, buff, "lsp", &lsp);
+
+	ret = vfd_ops->set_pf_qos_tc_lsp(pdev, tc, lsp);
+	if (ret) {
+		dev_err(&pdev->dev, "Failed to store PF QoS lsp value.\n");
+		return ret;
+	}
+
+	return count;
+}
+
+/**
+ * pf_qos_tc_max_bw_show - handler for PF's max bandwidth for given TC show
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer for data
+ **/
+static ssize_t pf_qos_tc_max_bw_show(struct kobject *kobj,
+				     struct kobj_attribute *attr, char *buff)
+{
+	struct pci_dev *pdev;
+	int tc, ret;
+	u16 max_bw;
+
+	if (!vfd_ops->set_pf_qos_tc_max_bw || !vfd_ops->get_pf_qos_tc_max_bw)
+		return -EOPNOTSUPP;
+
+	ret = __get_pdev_tc(kobj, &pdev, &tc);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_pf_qos_tc_max_bw(pdev, tc, &max_bw);
+	if (ret)
+		return ret;
+
+	ret = scnprintf(buff, PAGE_SIZE, "%d\n", max_bw);
+
+	return ret;
+}
+
+/**
+ * pf_qos_tc_max_bw_store - handler for PF's max bandwidth for given TC store
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer with input data
+ * @count:	size of buff
+ *
+ * On success return count, indicating that we used the whole buffer. On
+ * failure return a negative error condition.
+ **/
+static ssize_t pf_qos_tc_max_bw_store(struct kobject *kobj,
+				      struct kobj_attribute *attr,
+				      const char *buff, size_t count)
+{
+	struct pci_dev *pdev;
+	int tc, ret;
+	u16 bw;
+
+	if (!vfd_ops->set_pf_qos_tc_max_bw || !vfd_ops->get_pf_qos_tc_max_bw)
+		return -EOPNOTSUPP;
+
+	ret = __get_pdev_tc(kobj, &pdev, &tc);
+	if (ret)
+		return ret;
+
+	ret = kstrtou16(buff, 10, &bw);
+	if (ret) {
+		dev_err(&pdev->dev, "Invalid input\n");
+		return ret;
+	}
+
+	ret = vfd_ops->set_pf_qos_tc_max_bw(pdev, tc,
+					    round_nearest_quanta(bw));
+	if (ret)
+		return ret;
+
+	return count;
+}
+
+/**
+ * vf_max_tc_tx_rate_show - handler for VF's max per TC tx rate show
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer for data
+ **/
+static ssize_t vf_max_tc_tx_rate_show(struct kobject *kobj,
+				      struct kobj_attribute *attr, char *buff)
+{
+	int tc, vf_id, tc_tx_rate, ret;
+	struct pci_dev *pdev;
+
+	if (!vfd_ops->set_vf_max_tc_tx_rate || !vfd_ops->get_vf_max_tc_tx_rate)
+		return -EOPNOTSUPP;
+
+	ret = __get_vf_tc_pdev(kobj, &pdev, &vf_id, &tc);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_vf_max_tc_tx_rate(pdev, vf_id, tc, &tc_tx_rate);
+	if (ret)
+		return ret;
+
+	ret = scnprintf(buff, PAGE_SIZE, "%d\n", tc_tx_rate);
+	return ret;
+}
+
+/**
+ * vf_max_tc_tx_rate_store - handler for VF's max per TC tx rate store
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer with input data
+ * @count:	size of buff
+ *
+ * On success return count, indicating that we used the whole buffer. On
+ * failure return a negative error condition.
+ **/
+static ssize_t vf_max_tc_tx_rate_store(struct kobject *kobj,
+				       struct kobj_attribute *attr,
+				       const char *buff, size_t count)
+{
+	int tc, vf_id, tc_tx_rate, ret;
+	struct pci_dev *pdev;
+
+	if (!vfd_ops->set_vf_max_tc_tx_rate || !vfd_ops->get_vf_max_tc_tx_rate)
+		return -EOPNOTSUPP;
+
+	ret = __get_vf_tc_pdev(kobj, &pdev, &vf_id, &tc);
+	if (ret)
+		return ret;
+	ret = kstrtoint(buff, 10, &tc_tx_rate);
+	if (ret) {
+		dev_err(&pdev->dev,
+			"Invalid input, provide bandwidth as number.\n");
+		return ret;
+	}
+
+	ret = vfd_ops->set_vf_max_tc_tx_rate(pdev, vf_id, tc,
+					     round_nearest_quanta(tc_tx_rate));
+	if (ret) {
+		dev_err(&pdev->dev,
+			"Failed to assign max TC tx rate.\n");
+		return ret;
+	}
+
+	return count;
+}
+
+/**
+ * vf_qos_tc_share_show - handler for VF bandwidth share per TC show
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer for data
+ **/
+static ssize_t vf_qos_tc_share_show(struct kobject *kobj,
+				    struct kobj_attribute *attr, char *buff)
+{
+	struct pci_dev *pdev;
+	int tc, vf_id, ret;
+	u8 share;
+
+	if (!vfd_ops->set_vf_qos_tc_share || !vfd_ops->get_vf_qos_tc_share)
+		return -EOPNOTSUPP;
+
+	ret = __get_vf_tc_pdev(kobj, &pdev, &vf_id, &tc);
+	if (ret)
+		return ret;
+
+	ret = vfd_ops->get_vf_qos_tc_share(pdev, vf_id, tc, &share);
+	if (ret)
+		return ret;
+
+	ret = scnprintf(buff, PAGE_SIZE, "%d\n", share);
+	return ret;
+}
+
+/**
+ * vf_qos_tc_share_store - handler for VF bandwidth share per TC store
+ * @kobj:	kobject being called
+ * @attr:	struct kobj_attribute
+ * @buff:	buffer with input data
+ * @count:	size of buff
+ *
+ * On success return count, indicating that we used the whole buffer. On
+ * failure return a negative error condition.
+ **/
+static ssize_t vf_qos_tc_share_store(struct kobject *kobj,
+				     struct kobj_attribute *attr,
+				     const char *buff, size_t count)
+{
+	struct pci_dev *pdev;
+	int tc, vf_id, ret;
+	u8 share;
+
+	if (!vfd_ops->set_vf_qos_tc_share || !vfd_ops->get_vf_qos_tc_share)
+		return -EOPNOTSUPP;
+
+	ret = __get_vf_tc_pdev(kobj, &pdev, &vf_id, &tc);
+	if (ret)
+		return ret;
+
+	ret = kstrtou8(buff, 10, &share);
+	if (ret) {
+		dev_err(&pdev->dev, "Invalid input\n");
+		return ret;
+	}
+
+	if (share > 100) {
+		dev_err(&pdev->dev, "Share must be in range 0-100.\n");
+		return -EINVAL;
+	}
+
+	ret = vfd_ops->set_vf_qos_tc_share(pdev, vf_id, tc, share);
+	if (ret)
+		return ret;
+
+	return count;
+}
+
 static struct kobj_attribute trunk_attribute =
 	__ATTR(trunk, 0644, vfd_trunk_show, vfd_trunk_store);
 static struct kobj_attribute vlan_mirror_attribute =
@@ -1652,12 +2834,18 @@ static struct kobj_attribute max_tx_rate_attribute =
 	__ATTR(max_tx_rate, 0644, vfd_max_tx_rate_show, vfd_max_tx_rate_store);
 static struct kobj_attribute min_tx_rate_attribute =
 	__ATTR(min_tx_rate, 0644, vfd_min_tx_rate_show, vfd_min_tx_rate_store);
-static struct kobj_attribute spoofcheck_attribute =
-	__ATTR(spoofcheck, 0644, vfd_spoofcheck_show, vfd_spoofcheck_store);
 static struct kobj_attribute trust_attribute =
 	__ATTR(trust, 0644, vfd_trust_show, vfd_trust_store);
-static struct kobj_attribute vlan_attribute =
-	__ATTR(vlan, 0644, vfd_vlan_show, vfd_vlan_store);
+static struct kobj_attribute reset_stats_attribute =
+	__ATTR(reset_stats, 0200, NULL, vfd_reset_stats_store);
+static struct kobj_attribute enable_attribute =
+	__ATTR(enable, 0644, vfd_enable_show, vfd_enable_store);
+static struct kobj_attribute num_queues_attribute =
+	__ATTR(num_queues, 0644, vfd_num_queues_show, vfd_num_queues_store);
+static struct kobj_attribute queue_type_attribute =
+	__ATTR(queue_type, 0644, vfd_queue_type_show, vfd_queue_type_store);
+static struct kobj_attribute allow_bcast_attribute =
+	__ATTR(allow_bcast, 0644, vfd_allow_bcast_show, vfd_allow_bcast_store);
 
 static struct attribute *s_attrs[] = {
 	&trunk_attribute.attr,
@@ -1675,9 +2863,12 @@ static struct attribute *s_attrs[] = {
 	&link_state_attribute.attr,
 	&max_tx_rate_attribute.attr,
 	&min_tx_rate_attribute.attr,
-	&spoofcheck_attribute.attr,
 	&trust_attribute.attr,
-	&vlan_attribute.attr,
+	&reset_stats_attribute.attr,
+	&enable_attribute.attr,
+	&num_queues_attribute.attr,
+	&queue_type_attribute.attr,
+	&allow_bcast_attribute.attr,
 	NULL,
 };
 
@@ -1719,16 +2910,152 @@ static struct attribute_group stats_group = {
 	.attrs = stats_attrs,
 };
 
+static struct kobj_attribute share_attribute =
+	__ATTR(share, 0644, qos_share_show, qos_share_store);
+
+static struct attribute *qos_attrs[] = {
+	&share_attribute.attr,
+	NULL,
+};
+
+static struct attribute_group qos_group = {
+	.attrs = qos_attrs,
+};
+
+static struct kobj_attribute apply_attribute =
+	__ATTR(apply, 0200, NULL, pf_qos_apply_store);
+
+static struct attribute *pf_qos_attrs[] = {
+	&apply_attribute.attr,
+	NULL,
+};
+
+static struct attribute_group pf_qos_group = {
+	.attrs = pf_qos_attrs,
+};
+
+static struct kobj_attribute pf_ingress_mirror_attribute =
+	__ATTR(ingress_mirror, 0644, pf_ingress_mirror_show, pf_ingress_mirror_store);
+static struct kobj_attribute pf_egress_mirror_attribute =
+	__ATTR(egress_mirror, 0644, pf_egress_mirror_show, pf_egress_mirror_store);
+static struct kobj_attribute pf_tpid_attribute =
+	__ATTR(tpid, 0644, pf_tpid_show, pf_tpid_store);
+
+static struct attribute *pf_attrs[] = {
+	&pf_ingress_mirror_attribute.attr,
+	&pf_egress_mirror_attribute.attr,
+	&pf_tpid_attribute.attr,
+	NULL,
+};
+
+static struct attribute_group pf_attr_group = {
+	.attrs = pf_attrs,
+};
+
+static struct kobj_attribute vf_qos_tc_max_tc_tx_rate_attribute =
+	__ATTR(max_tc_tx_rate, 0644, vf_max_tc_tx_rate_show,
+	       vf_max_tc_tx_rate_store);
+static struct kobj_attribute vf_qos_tc_share_attribute =
+	__ATTR(share, 0644, vf_qos_tc_share_show,
+	       vf_qos_tc_share_store);
+
+static struct attribute *vf_qos_tc_attrs[] = {
+	&vf_qos_tc_max_tc_tx_rate_attribute.attr,
+	&vf_qos_tc_share_attribute.attr,
+	NULL,
+};
+
+static struct attribute_group vf_qos_tc_group = {
+	.attrs = vf_qos_tc_attrs,
+};
+
+static struct kobj_attribute pf_qos_tc_priority_attribute =
+	__ATTR(priority, 0644, pf_qos_tc_priority_show,
+	       pf_qos_tc_priority_store);
+static struct kobj_attribute pf_qos_tc_lsp_attribute =
+	__ATTR(lsp, 0644, pf_qos_tc_lsp_show, pf_qos_tc_lsp_store);
+static struct kobj_attribute pf_qos_tc_max_bw_attribute =
+	__ATTR(max_bw, 0644, pf_qos_tc_max_bw_show, pf_qos_tc_max_bw_store);
+
+static struct attribute *pf_qos_tc_attrs[] = {
+	&pf_qos_tc_priority_attribute.attr,
+	&pf_qos_tc_lsp_attribute.attr,
+	&pf_qos_tc_max_bw_attribute.attr,
+	NULL,
+};
+
+static struct attribute_group pf_qos_tc_group = {
+	.attrs = pf_qos_tc_attrs,
+};
+
+/**
+ * create_qos_tc_sysfs - create sysfs hierarchy for PF QOS traffic classes.
+ * @pdev:       PCI device information struct
+ * @tc:		Pointer to preallocated array of 8 kobjects.
+ * @parent:     QOS parent
+ * @attr_group:	attribute group to assign to tc kobject
+ *
+ * Creates a kobject for PF QOS traffic classes and assigns attributes to it.
+ * Assumes mem is preallocated
+ **/
+static int create_qos_tc_sysfs(struct pci_dev *pdev, struct kobject **tc,
+			       struct kobject *parent,
+			       struct attribute_group *attr_group)
+{
+	struct kobject *pf_qos_tc;
+	char kname[2];
+	int ret, i;
+
+	for (i = 0; i < VFD_NUM_TC; i++) {
+		int length = snprintf(kname, sizeof(kname), "%d", i);
+
+		if (length >= sizeof(kname)) {
+			dev_err(&pdev->dev,
+				"cannot request %d tcs, try again with smaller number of vfs\n",
+				i);
+			--i;
+			ret = -EINVAL;
+			goto err_qos_tc_sysfs;
+		}
+		pf_qos_tc = kobject_create_and_add(kname, parent);
+
+		if (!pf_qos_tc) {
+			dev_err(&pdev->dev,
+				"failed to create VF kobj: %s\n", kname);
+			i--;
+			ret = -ENOMEM;
+			goto err_qos_tc_sysfs;
+		}
+		dev_info(&pdev->dev, "created VF %s sysfs", parent->name);
+		tc[i] = pf_qos_tc;
+
+		/* create VF sys attr */
+		ret = sysfs_create_group(tc[i], attr_group);
+		if (ret) {
+			dev_err(&pdev->dev, "failed to create PF QOS TC attributes: %d",
+				i);
+			goto err_qos_tc_sysfs;
+		}
+	}
+
+	return 0;
+err_qos_tc_sysfs:
+	for (; i >= 0; i--)
+		kobject_put(tc[i]);
+	return ret;
+}
+
 /**
  * create_vfs_sysfs - create sysfs hierarchy for VF
- * @pdev: 	PCI device information struct
- * @vfd_obj: 	VF-d kobjects information struct
+ * @pdev:	PCI device information struct
+ * @vfd_obj:	VF-d kobjects information struct
  *
  * Creates a kobject for Virtual Function and assigns attributes to it.
  **/
 static int create_vfs_sysfs(struct pci_dev *pdev, struct vfd_objects *vfd_obj)
 {
 	struct kobject *vf_kobj;
+	struct vfd_vf_obj *vfs;
 	char kname[4];
 	int ret, i;
 
@@ -1740,8 +3067,11 @@ static int create_vfs_sysfs(struct pci_dev *pdev, struct vfd_objects *vfd_obj)
 				"cannot request %d vfs, try again with smaller number of vfs\n",
 				i);
 			--i;
+			ret = -EINVAL;
 			goto err_vfs_sysfs;
 		}
+
+		vfs = &vfd_obj->vfs[i];
 
 		vf_kobj = kobject_create_and_add(kname, vfd_obj->sriov_kobj);
 		if (!vf_kobj) {
@@ -1752,18 +3082,32 @@ static int create_vfs_sysfs(struct pci_dev *pdev, struct vfd_objects *vfd_obj)
 			goto err_vfs_sysfs;
 		}
 		dev_info(&pdev->dev, "created VF %s sysfs", vf_kobj->name);
+		vfs->vf_kobj = vf_kobj;
+
+		vfs->vf_qos_kobj = kobject_create_and_add("qos", vfs->vf_kobj);
+		create_qos_tc_sysfs(pdev, vfs->vf_tc_kobjs, vfs->vf_qos_kobj,
+				    &vf_qos_tc_group);
 
 		/* create VF sys attr */
-		ret = sysfs_create_group(vf_kobj, &vfd_group);
+		ret = sysfs_create_group(vfs->vf_kobj, &vfd_group);
 		if (ret) {
-			dev_err(&pdev->dev, "failed to create VF sys attribute: %d", i);
+			dev_err(&pdev->dev, "failed to create VF sys attribute: %d",
+				i);
 			goto err_vfs_sysfs;
 		}
-		vfd_obj->vf_kobj[i] = vf_kobj;
-
-		ret = sysfs_create_group(vf_kobj, &stats_group);
+		/* create VF stats sys attr */
+		ret = sysfs_create_group(vfs->vf_kobj, &stats_group);
 		if (ret) {
-			dev_err(&pdev->dev, "failed to create VF stats attribute: %d", i);
+			dev_err(&pdev->dev, "failed to create VF stats attribute: %d",
+				i);
+			goto err_vfs_sysfs;
+		}
+
+		/* create VF qos sys attr */
+		ret = sysfs_create_group(vfs->vf_qos_kobj, &qos_group);
+		if (ret) {
+			dev_err(&pdev->dev, "failed to create VF qos attribute: %d",
+				i);
 			goto err_vfs_sysfs;
 		}
 	}
@@ -1772,64 +3116,124 @@ static int create_vfs_sysfs(struct pci_dev *pdev, struct vfd_objects *vfd_obj)
 
 err_vfs_sysfs:
 	for (; i >= 0; i--)
-		kobject_put(vfd_obj->vf_kobj[i]);
+		kobject_put(vfd_obj->vfs[i].vf_kobj);
 	return ret;
 }
 
 /**
  * create_vfd_sysfs - create sysfs hierarchy used by VF-d
- * @pdev: 		PCI device information struct
- * @num_alloc_vfs: 	number of VFs to allocate
+ * @pdev:		PCI device information struct
+ * @num_alloc_vfs:	number of VFs to allocate
  *
  * If the kobjects were not able to be created, NULL will be returned.
  **/
 struct vfd_objects *create_vfd_sysfs(struct pci_dev *pdev, int num_alloc_vfs)
 {
+	struct vfd_qos_objects *qos_objs;
 	struct vfd_objects *vfd_obj;
 	int ret;
 
-	vfd_obj = kzalloc(sizeof(*vfd_obj) +
-			  sizeof(struct kobject *)*num_alloc_vfs, GFP_KERNEL);
+	vfd_obj = kzalloc(sizeof(*vfd_obj), GFP_KERNEL);
 	if (!vfd_obj)
 		return NULL;
 
-	vfd_obj->num_vfs = num_alloc_vfs;
+	qos_objs = kzalloc(sizeof(*qos_objs), GFP_KERNEL);
+	if (!qos_objs)
+		goto err_qos;
 
+	vfd_obj->vfs = kcalloc(num_alloc_vfs, sizeof(*vfd_obj->vfs),
+			       GFP_KERNEL);
+	if (!vfd_obj->vfs)
+		goto err_vfs;
+
+	vfd_obj->qos = qos_objs;
+	vfd_obj->num_vfs = num_alloc_vfs;
 	vfd_obj->sriov_kobj = kobject_create_and_add("sriov", &pdev->dev.kobj);
 	if (!vfd_obj->sriov_kobj)
 		goto err_sysfs;
-
 	dev_info(&pdev->dev, "created %s sysfs", vfd_obj->sriov_kobj->name);
+
+	qos_objs->qos_kobj = kobject_create_and_add("qos",
+						    vfd_obj->sriov_kobj);
+	if (!qos_objs->qos_kobj) {
+		dev_err(&pdev->dev, "failed to create VF qos pf kobject");
+		goto err_pf_qos;
+	}
+
 	ret = create_vfs_sysfs(pdev, vfd_obj);
 	if (ret)
-		goto err_sysfs;
+		goto err_pf_qos;
+
+	create_qos_tc_sysfs(pdev, qos_objs->pf_qos_kobjs, qos_objs->qos_kobj,
+			    &pf_qos_tc_group);
+	/* create PF qos sys attr */
+	ret = sysfs_create_group(qos_objs->qos_kobj, &pf_qos_group);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to create PF qos sys attribute");
+		goto err_pf_qos;
+	}
+
+	/* create PF attrs */
+	ret = sysfs_create_group(vfd_obj->sriov_kobj, &pf_attr_group);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to create PF attr sys attribute");
+		goto err_pf_qos;
+	}
 
 	return vfd_obj;
 
-err_sysfs:
+err_pf_qos:
 	kobject_put(vfd_obj->sriov_kobj);
+err_sysfs:
+	kfree(vfd_obj->vfs);
+err_vfs:
+	kfree(qos_objs);
+err_qos:
 	kfree(vfd_obj);
-
 	return NULL;
+}
+
+static void free_vfd_vf(struct pci_dev *pdev, struct vfd_vf_obj *vf)
+{
+	int i;
+
+	for (i = 0; i < VFD_NUM_TC; i++) {
+		dev_dbg(&pdev->dev, "deleting VF %s tc",
+			vf->vf_tc_kobjs[i]->name);
+		kobject_put(vf->vf_tc_kobjs[i]);
+	}
+
+	dev_info(&pdev->dev, "deleting VF %s sysfs", vf->vf_qos_kobj->name);
+	kobject_put(vf->vf_qos_kobj);
+	dev_info(&pdev->dev, "deleting VF %s sysfs", vf->vf_kobj->name);
+	kobject_put(vf->vf_kobj);
 }
 
 /**
  * destroy_vfd_sysfs - destroy sysfs hierarchy used by VF-d
  * @pdev:	PCI device information struct
- * @vfd_obj: 	VF-d kobjects information struct
+ * @vfd_obj:	VF-d kobjects information struct
  **/
 void destroy_vfd_sysfs(struct pci_dev *pdev, struct vfd_objects *vfd_obj)
 {
 	int i;
 
-	for (i = 0; i < vfd_obj->num_vfs; i++) {
-		dev_info(&pdev->dev, "deleting VF %s sysfs",
-			 vfd_obj->vf_kobj[i]->name);
-		kobject_put(vfd_obj->vf_kobj[i]);
+	for (i = 0; i < vfd_obj->num_vfs; i++)
+		free_vfd_vf(pdev, &vfd_obj->vfs[i]);
+
+	for (i = 0; i < VFD_NUM_TC; i++) {
+		dev_info(&pdev->dev, "deleting sriov qos %s sysfs",
+			 vfd_obj->qos->pf_qos_kobjs[i]->name);
+		kobject_put(vfd_obj->qos->pf_qos_kobjs[i]);
 	}
+
+	dev_info(&pdev->dev, "deleting %s sysfs",
+		 vfd_obj->qos->qos_kobj->name);
+	kobject_put(vfd_obj->qos->qos_kobj);
 
 	dev_info(&pdev->dev, "deleting %s sysfs", vfd_obj->sriov_kobj->name);
 	kobject_put(vfd_obj->sriov_kobj);
-
+	kfree(vfd_obj->qos);
+	kfree(vfd_obj->vfs);
 	kfree(vfd_obj);
 }

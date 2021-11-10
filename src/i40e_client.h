@@ -1,11 +1,17 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright(c) 2013 - 2018 Intel Corporation. */
+/* Copyright(c) 2013 - 2021 Intel Corporation. */
 
 #ifndef _I40E_CLIENT_H_
 #define _I40E_CLIENT_H_
 
-#define I40E_CLIENT_STR_LENGTH 10
+#include <linux/platform_device.h>
+#if IS_ENABLED(CONFIG_MFD_CORE)
+#include <linux/mfd/core.h>
 
+#define I40E_PEER_RDMA_NAME    "i40e_rdma"
+#define I40E_PEER_RDMA_ID      PLATFORM_DEVID_AUTO
+#endif /* CONFIG_MFD_CORE */
+#define I40E_CLIENT_STR_LENGTH 10
 /* Client interface version should be updated anytime there is a change in the
  * existing APIs or data structures.
  */
@@ -105,6 +111,10 @@ struct i40e_info {
 	u16 fw_maj_ver;                 /* firmware major version */
 	u16 fw_min_ver;                 /* firmware minor version */
 	u32 fw_build;                   /* firmware build number */
+#if IS_ENABLED(CONFIG_MFD_CORE)
+	struct platform_device *platform_dev;
+#endif
+	struct i40e_client *client;
 };
 
 #define I40E_CLIENT_RESET_LEVEL_PF   1
@@ -132,6 +142,10 @@ struct i40e_ops {
 			       struct i40e_client *client,
 			       bool is_vf, u32 vf_id,
 			       u32 flag, u32 valid_flag);
+
+	int (*client_device_register)(struct i40e_info *ldev);
+
+	void (*client_device_unregister)(struct i40e_info *ldev);
 };
 
 struct i40e_client_ops {
@@ -197,8 +211,15 @@ static inline bool i40e_client_is_registered(struct i40e_client *client)
 	return test_bit(__I40E_CLIENT_REGISTERED, &client->state);
 }
 
-/* used by clients */
-int i40e_register_client(struct i40e_client *client);
-int i40e_unregister_client(struct i40e_client *client);
+#if IS_ENABLED(CONFIG_MFD_CORE)
+#define ASSIGN_PEER_INFO                                               \
+{                                                                      \
+	{ .name = I40E_PEER_RDMA_NAME, .id = I40E_PEER_RDMA_ID },       \
+}
 
+struct i40e_peer_dev_platform_data {
+	struct i40e_info *ldev;
+};
+#endif /* CONFIG_MFD_CORE */
 #endif /* _I40E_CLIENT_H_ */
+

@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright(c) 2013 - 2018 Intel Corporation. */
+/* Copyright(c) 2013 - 2021 Intel Corporation. */
 
 #ifndef _I40E_TYPE_H_
 #define _I40E_TYPE_H_
@@ -16,7 +16,7 @@
 #define I40E_MASK(mask, shift) (mask << shift)
 
 #define I40E_MAX_VSI_QP			16
-#define I40E_MAX_VF_VSI			3
+#define I40E_MAX_VF_VSI			4
 #define I40E_MAX_CHAINED_RX_BUFFERS	5
 #define I40E_MAX_PF_UDP_OFFLOAD_PORTS	16
 
@@ -165,6 +165,14 @@ enum i40e_queue_type {
 	I40E_QUEUE_TYPE_UNKNOWN
 };
 
+enum i40e_prt_mac_link_speed {
+	I40E_PRT_MAC_LINK_SPEED_100MB = 0,
+	I40E_PRT_MAC_LINK_SPEED_1GB,
+	I40E_PRT_MAC_LINK_SPEED_10GB,
+	I40E_PRT_MAC_LINK_SPEED_40GB,
+	I40E_PRT_MAC_LINK_SPEED_20GB
+};
+
 struct i40e_link_status {
 	enum i40e_aq_phy_type phy_type;
 	enum i40e_aq_link_speed link_speed;
@@ -258,12 +266,8 @@ struct i40e_phy_info {
 					     I40E_PHY_TYPE_OFFSET)
 #define I40E_CAP_PHY_TYPE_25GBASE_ACC BIT_ULL(I40E_PHY_TYPE_25GBASE_ACC + \
 					     I40E_PHY_TYPE_OFFSET)
-/* Offset for 2.5G/5G PHY Types value to bit number conversion */
-#define I40E_PHY_TYPE_OFFSET2 (-10)
-#define I40E_CAP_PHY_TYPE_2_5GBASE_T BIT_ULL(I40E_PHY_TYPE_2_5GBASE_T + \
-					     I40E_PHY_TYPE_OFFSET2)
-#define I40E_CAP_PHY_TYPE_5GBASE_T BIT_ULL(I40E_PHY_TYPE_5GBASE_T + \
-					     I40E_PHY_TYPE_OFFSET2)
+#define I40E_CAP_PHY_TYPE_2_5GBASE_T BIT_ULL(I40E_PHY_TYPE_2_5GBASE_T)
+#define I40E_CAP_PHY_TYPE_5GBASE_T BIT_ULL(I40E_PHY_TYPE_5GBASE_T)
 #define I40E_HW_CAP_MAX_GPIO			30
 enum i40e_acpi_programming_method {
 	I40E_ACPI_PROGRAMMING_METHOD_HW_FVL = 0,
@@ -351,6 +355,7 @@ struct i40e_hw_capabilities {
 	u32 enabled_tcmap;
 	u32 maxtc;
 	u64 wr_csr_prot;
+	bool dis_unused_ports;
 	bool apm_wol_support;
 	enum i40e_acpi_programming_method acpi_prog_method;
 	bool proxy_support;
@@ -664,12 +669,18 @@ struct i40e_hw {
 #define I40E_HW_FLAG_AQ_PHY_ACCESS_CAPABLE  BIT_ULL(2)
 #define I40E_HW_FLAG_NVM_READ_REQUIRES_LOCK BIT_ULL(3)
 #define I40E_HW_FLAG_FW_LLDP_STOPPABLE	    BIT_ULL(4)
+#define I40E_HW_FLAG_FW_LLDP_PERSISTENT     BIT_ULL(5)
+#define I40E_HW_FLAG_AQ_PHY_ACCESS_EXTENDED BIT_ULL(6)
+#define I40E_HW_FLAG_DROP_MODE		    BIT_ULL(7)
+#define I40E_HW_FLAG_X722_FEC_REQUEST_CAPABLE BIT_ULL(8)
 	u64 flags;
 
 	/* Used in set switch config AQ command */
 	u16 switch_tag;
 	u16 first_tag;
 	u16 second_tag;
+	bool is_double_vlan;
+	bool is_outer_vlan_processing;
 
 	/* NVMUpdate features */
 	struct i40e_nvmupd_features nvmupd_features;
@@ -730,7 +741,7 @@ union i40e_32byte_rx_desc {
 		__le64  rsvd2;
 	} read;
 	struct {
-		struct {
+		struct i40e_32b_rx_wb_qw0 {
 			struct {
 				union {
 					__le16 mirroring_status;
@@ -768,6 +779,9 @@ union i40e_32byte_rx_desc {
 			} hi_dword;
 		} qword3;
 	} wb;  /* writeback */
+	struct {
+		u64 qword[4];
+	} raw;
 };
 
 enum i40e_rx_desc_status_bits {
@@ -863,7 +877,8 @@ enum i40e_rx_l2_ptype {
 	I40E_RX_PTYPE_GRENAT4_MAC_PAY3			= 58,
 	I40E_RX_PTYPE_GRENAT4_MACVLAN_IPV6_ICMP_PAY4	= 87,
 	I40E_RX_PTYPE_GRENAT6_MAC_PAY3			= 124,
-	I40E_RX_PTYPE_GRENAT6_MACVLAN_IPV6_ICMP_PAY4	= 153
+	I40E_RX_PTYPE_GRENAT6_MACVLAN_IPV6_ICMP_PAY4	= 153,
+	I40E_RX_PTYPE_PARSER_ABORTED			= 255
 };
 
 struct i40e_rx_ptype_decoded {
@@ -1333,6 +1348,8 @@ struct i40e_hw_port_stats {
 	u32 rx_lpi_status;
 	u64 tx_lpi_count;		/* etlpic */
 	u64 rx_lpi_count;		/* erlpic */
+	u64 tx_lpi_duration;
+	u64 rx_lpi_duration;
 };
 
 /* Checksum and Shadow RAM pointers */
@@ -1355,6 +1372,7 @@ struct i40e_hw_port_stats {
 #define I40E_SR_VPD_PTR				0x2F
 #define I40E_SR_PCIE_ALT_AUTO_LOAD_PTR		0x3E
 #define I40E_SR_SW_CHECKSUM_WORD		0x3F
+#define I40E_SR_EMP_SR_SETTINGS_PTR		0x48
 
 /* Auxiliary field, mask and shift definition for Shadow RAM and NVM Flash */
 #define I40E_SR_VPD_MODULE_MAX_SIZE		1024
@@ -1479,6 +1497,24 @@ enum i40e_reset_type {
 	I40E_RESET_EMPR		= 3,
 };
 
+/* EMP Settings Module Header Section */
+struct i40e_emp_settings_module {
+	u16 length;
+	u16 fw_params;
+	u16 reserved;
+	u16 features;
+	u16 oem_cfg;
+	u16 pfalloc_ptr;
+	u16 eee_variables;
+	u16 lldp_cfg_ptr;
+	u16 ltr_max_snoop;
+	u16 ltr_max_no_snoop;
+	u16 ltr_delta;
+	u16 ltr_grade_value;
+	u16 lldp_tlv_ptr;
+	u16 crc8;
+};
+
 /* IEEE 802.1AB LLDP Agent Variables from NVM */
 #define I40E_NVM_LLDP_CFG_PTR   0x06
 #define I40E_SR_LLDP_CFG_PTR    0x31
@@ -1523,6 +1559,8 @@ struct i40e_lldp_variables {
 #define I40E_L4_DST_MASK		(0x1ULL << I40E_L4_DST_SHIFT)
 #define I40E_VERIFY_TAG_SHIFT		31
 #define I40E_VERIFY_TAG_MASK		(0x3ULL << I40E_VERIFY_TAG_SHIFT)
+#define I40E_VLAN_SRC_SHIFT		55
+#define I40E_VLAN_SRC_MASK		(0x1ULL << I40E_VLAN_SRC_SHIFT)
 
 #define I40E_FLEX_50_SHIFT		13
 #define I40E_FLEX_50_MASK		(0x1ULL << I40E_FLEX_50_SHIFT)
@@ -1575,6 +1613,8 @@ struct i40e_metadata_segment {
 	struct i40e_ddp_version version;
 #define I40E_DDP_TRACKID_RDONLY		0
 #define I40E_DDP_TRACKID_INVALID	0xFFFFFFFF
+#define I40E_DDP_TRACKID_GRP_MSK	0x00FF0000
+#define I40E_DDP_TRACKID_GRP_COMP_ALL	0xFF
 	u32 track_id;
 	char name[I40E_DDP_NAME_SIZE];
 };
@@ -1642,4 +1682,10 @@ struct i40e_profile_info {
 	u8 reserved[7];
 	u8 name[I40E_DDP_NAME_SIZE];
 };
+
+#define I40E_BCM_PHY_PCS_STATUS1_PAGE	0x3
+#define I40E_BCM_PHY_PCS_STATUS1_REG	0x0001
+#define I40E_BCM_PHY_PCS_STATUS1_RX_LPI	BIT(8)
+#define I40E_BCM_PHY_PCS_STATUS1_TX_LPI	BIT(9)
+
 #endif /* _I40E_TYPE_H_ */
