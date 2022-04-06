@@ -373,8 +373,8 @@ export INSTALL_MOD_DIR ?= updates/drivers/net/ethernet/intel/${DRIVER}
 # If the check_aux_bus script exists, then this driver depends on the
 # auxiliary module. Run the script to determine if we need to include
 # auxiliary files with this build.
-ifneq ($(call test_file,./check_aux_bus),)
-NEED_AUX_BUS := $(shell ./check_aux_bus --ksrc="${KSRC}" --build-kernel="${BUILD_KERNEL}" >/dev/null 2>&1; echo $$?)
+ifneq ($(call test_file,../scripts/check_aux_bus),)
+NEED_AUX_BUS := $(shell ../scripts/check_aux_bus --ksrc="${KSRC}" --build-kernel="${BUILD_KERNEL}" >/dev/null 2>&1; echo $$?)
 endif # check_aux_bus exists
 
 # The out-of-tree auxiliary module we ship should be moved into this

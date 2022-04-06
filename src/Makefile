@@ -148,7 +148,7 @@ uninstall: modules_uninstall mandocs_uninstall
 	$(call cmd_initramfs)
 
 auxiliary_info:
-	@./check_aux_bus --verbose --ksrc="${KSRC}" --build-kernel="${BUILD_KERNEL}"
+	@../scripts/check_aux_bus --verbose --ksrc="${KSRC}" --build-kernel="${BUILD_KERNEL}"
 
 ifeq (${NEED_AUX_BUS},1)
 default: auxiliary_info
