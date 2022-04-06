@@ -1,23 +1,25 @@
---- src/kcompat_std_defs.h	2021-09-22 19:13:19.000000000 +0200
-+++ /usr/src/i40e-2.17.4/kcompat_std_defs.h	2021-11-10 13:47:11.000000000 +0100
-@@ -91,6 +91,11 @@
- #define HAVE_TCF_EXTS_FOR_EACH_ACTION
- #endif /* 4,19,0 */
+diff --git a/debian/i40e-dkms.dkms b/debian/i40e-dkms.dkms
+index 9efd4bd..fad7163 100644
+--- a/debian/i40e-dkms.dkms
++++ b/debian/i40e-dkms.dkms
+@@ -2,5 +2,7 @@ PACKAGE_NAME="i40e"
+ PACKAGE_VERSION="#MODULE_VERSION#"
+ BUILT_MODULE_NAME[0]="$PACKAGE_NAME"
+ DEST_MODULE_LOCATION[0]="/updates/dkms/intel/ethernet"
++BUILT_MODULE_NAME[1]="auxiliary"
++DEST_MODULE_LOCATION[1]="/updates/dkms/intel/ethernet"
+ AUTOINSTALL="YES"
+ REMAKE_INITRD="YES"
+diff --git a/src/Makefile b/src/Makefile
+index 62220eb..96e2149 100644
+--- a/src/Makefile
++++ b/src/Makefile
+@@ -10,6 +10,8 @@ ifneq ($(KERNELRELEASE),)
+ ccflags-y += -I$(src)
+ subdir-ccflags-y += -I$(src)
  
-+/* HvB hack for debian 10 */
-+#if (LINUX_VERSION_CODE < KERNEL_VERSION(4,19,195))
-+#define NEED_SKB_FRAG_OFF_ACCESSORS
-+#endif
++NEED_AUX_BUS = 2
 +
- /*****************************************************************************/
- #if (LINUX_VERSION_CODE < KERNEL_VERSION(5,1,0))
- #else /* >= 5.1.0 */
-@@ -118,7 +123,7 @@
+ obj-m += i40e.o
  
- /*****************************************************************************/
- #if (LINUX_VERSION_CODE < KERNEL_VERSION(5,4,0))
--#define NEED_SKB_FRAG_OFF_ACCESSORS
-+/*HvB #define NEED_SKB_FRAG_OFF_ACCESSORS*/
- #define NEED_FLOW_INDR_BLOCK_CB_REGISTER
- #else /* >= 5.4.0 */
- #define HAVE_XSK_UNALIGNED_CHUNK_PLACEMENT
+ i40e-y := i40e_main.o \

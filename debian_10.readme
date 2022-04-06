@@ -1,12 +1,5 @@
-we have added a patch for debian 10.  If you use the standard debian 10 kernel,eg:
- * linux-image-4.19.0-17-amd64
+we have added a patch for debian 10. Kernels prior to 5.1 do not have the auxiliary bus driver.
+So we have to build it for debian 10
+ * patch -p1 < debian_10.patch
 
-In debian release 10.11 the default kernel is:
- * linux-image-4.19.0-18-amd64
-
-In this kernel there are some backports from kernel 5.4.0 and the driver does not
-compile anymore. SURF included a simple patch to fix this:
- * cd src
- * patch < ../debian10.patch
-
-This  patch compiles for old and new debian kernels
+This patch compiles/install the intel auxiliary kernel module
